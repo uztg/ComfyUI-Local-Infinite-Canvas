@@ -1,3 +1,1 @@
-// Runtime configuration regenerated from environment variables by docker-entrypoint.sh at container startup.
-// Local development and deployments without the entrypoint use these empty defaults, leaving analytics disabled.
-window.__RUNTIME_CONFIG__ = window.__RUNTIME_CONFIG__ || {};
+window.__RUNTIME_CONFIG__ = {"LOCAL_GATEWAY_HOST":"127.0.0.1","LOCAL_GATEWAY_PORT":"8190","LOCAL_GATEWAY_URL":"http://127.0.0.1:8190/v1"};

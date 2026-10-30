@@ -360,14 +360,17 @@ export async function createGatewayApp(overrides = {}) {
   app.use(corsMiddleware(config));
   const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
   const localOriginHosts = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
-  const isAllowedOrigin = (origin) => {
-    if (!origin) return true;
+  const isAllowedOrigin = (origin, crossSite = false) => {
+    if (!origin) return !crossSite;
     try {
-      if (localOriginHosts.has(new URL(origin).hostname)) return true;
+      const parsed = new URL(origin);
+      // Origin must be an HTTP(S) origin, not a URL with credentials or a path.
+      if (!["http:", "https:"].includes(parsed.protocol) || parsed.origin !== origin) return false;
+      if (localOriginHosts.has(parsed.hostname)) return true;
     } catch {
       return false;
     }
-    return config.corsOrigins.includes(origin) || config.corsOrigins.includes("*") || origin === config.publicBaseUrl;
+    return config.corsOrigins.includes(origin) || (!crossSite && config.corsOrigins.includes("*")) || origin === config.publicBaseUrl;
   };
   app.use((req, res, next) => {
     // 远程模式：管理接口要求令牌（/health 与生成接口不拦）
@@ -381,7 +384,9 @@ export async function createGatewayApp(overrides = {}) {
     if (!SAFE_METHODS.has(req.method)) {
       const origin = String(req.headers.origin || "");
       const site = String(req.headers["sec-fetch-site"] || "");
-      if (site === "cross-site" || !isAllowedOrigin(origin)) {
+      // localhost -> 127.0.0.1 is cross-site in browsers. Require a trusted
+      // explicit Origin for that case instead of rejecting every cross-site request.
+      if (!isAllowedOrigin(origin, site === "cross-site")) {
         res.status(403).json({ ok: false, error: { message: "跨站请求被拒绝" } });
         return;
       }
@@ -893,7 +898,7 @@ export async function createGatewayApp(overrides = {}) {
 
   app.post("/api/free-workflows/:id/sync", async (req, res) => {
     try {
-      const result = await freeWorkflows.sync(req.params.id);
+      const result = await freeWorkflows.sync(req.params.id, { force: req.body?.force === true });
       res.json({ changed: result.changed, workflow: await freeWorkflows.publicEntry(result.entry) });
     } catch (error) {
       throw new HttpError(`同步工作流失败：${error.message}`, { status: 409, code: "free_workflow_sync_failed" });

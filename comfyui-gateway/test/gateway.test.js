@@ -43,7 +43,7 @@ before(async () => {
     dataDir: path.join(tempDir, "data"),
     outputDir: path.join(tempDir, "data", "outputs"),
     publicBaseUrl: "http://127.0.0.1:18199",
-    corsOrigins: ["http://localhost:3000"],
+    corsOrigins: ["http://localhost:3000", "https://canvas.example.test"],
     requestTimeoutMs: 15000,
     videoTimeoutMs: 15000,
     pollIntervalMs: 50,
@@ -239,4 +239,31 @@ test("cross-site writes are rejected but local origins pass", async () => {
     assert.equal(blockedSite.response.status, 403);
     const allowed = await jsonFetch(`${baseUrl}/api/resources/refresh`, { method: "POST", headers: { Origin: "http://127.0.0.1:3000" } });
     assert.notEqual(allowed.response.status, 403);
+});
+
+test("browser cross-site writes from loopback aliases and explicit trusted origins succeed", async () => {
+  for (const origin of ["http://localhost:3000", "http://127.0.0.1:3000", "http://[::1]:3000", "https://canvas.example.test"]) {
+    const result = await jsonFetch(`${baseUrl}/api/resources/refresh`, {
+      method: "POST", headers: { Origin: origin, "Sec-Fetch-Site": "cross-site" },
+    });
+    assert.equal(result.response.status, 200, origin);
+    assert.equal(result.response.headers.get("access-control-allow-origin"), origin);
+  }
+});
+
+test("untrusted, opaque and malformed browser origins stay blocked", async () => {
+  for (const origin of ["https://evil.example", "http://localhost.evil.example:3000", "http://127.0.0.1.evil.example:3000", "null", "not-a-url", "http://user@localhost:3000", "http://localhost:3000/path", "ftp://localhost:3000"]) {
+    const result = await jsonFetch(`${baseUrl}/api/resources/refresh`, {
+      method: "POST", headers: { Origin: origin, "Sec-Fetch-Site": "cross-site" },
+    });
+    assert.equal(result.response.status, 403, origin);
+  }
+  const unknown = await jsonFetch(`${baseUrl}/api/resources/refresh`, {
+    method: "POST", headers: { "Sec-Fetch-Site": "cross-site" },
+  });
+  assert.equal(unknown.response.status, 403);
+  const spoofedSite = await jsonFetch(`${baseUrl}/api/resources/refresh`, {
+    method: "POST", headers: { Origin: "https://evil.example", "Sec-Fetch-Site": "same-origin" },
+  });
+  assert.equal(spoofedSite.response.status, 403);
 });

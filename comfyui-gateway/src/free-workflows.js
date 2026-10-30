@@ -5,6 +5,8 @@ import path from "node:path";
 import { isApiWorkflow, isUiWorkflow } from "./registry.js";
 import { bindingSummary, canonicalAspectRatio, convertUiWorkflow, detectFreeBindings, pruneUnreachableNodes } from "./ui-workflow.js";
 import { deepClone, nowIso, randomId, writeJsonAtomic } from "./util.js";
+import { CONVERSION_VERSION } from "./workflow-converter.js";
+import { checkWorkflowCompatibility } from "./workflow-compatibility.js";
 
 const FILE_NAME = "free-workflows.json";
 const SOURCE_CACHE_MS = 60 * 1000;
@@ -229,8 +231,7 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", comfy
 
   async function importSource(relative) {
     const source = await readSource(relative);
-    const bindings = detectFreeBindings(source.workflow, await getObjectInfo());
-    const warnings = [...(source.warnings || []), ...(bindings.warnings || [])];
+    const { bindings, warnings, compatibility } = await describeSource(source);
     const stat = await fsp.stat(source.sourcePath);
     const entry = {
       id: randomId("free_"),
@@ -238,6 +239,8 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", comfy
       sourceRel: String(relative).replace(/\\/g, "/"),
       sourceFormat: source.format,
       sourceSignature: source.signature,
+      conversionVersion: CONVERSION_VERSION,
+      compatibility,
       sourceUpdatedAt: new Date(stat.mtimeMs).toISOString(),
       workflow: source.workflow,
       bindings,
@@ -253,17 +256,31 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", comfy
     return entry;
   }
 
-  async function sync(id) {
+  async function describeSource(source) {
+    const info = await getObjectInfo();
+    const graph = pruneUnreachableNodes(source.workflow);
+    const bindings = detectFreeBindings(graph, info);
+    const issues = checkWorkflowCompatibility(graph, info);
+    if (!['image', 'video'].includes(bindings.outputType)) issues.push({ kind: 'output', message: '工作台自由卡片入口尚不支持此输出类型，请在 ComfyUI 中使用原工作流' });
+    const compatibility = { checkedAt: nowIso(), method: 'static', scope: 'active-output-branch', status: issues.length ? 'needs-attention' : 'passed', issues };
+    const warnings = [...(source.warnings || []), ...(bindings.warnings || []), ...issues.map(issue => `兼容性检查：${issue.message}${issue.value === undefined ? '' : `；当前值：${String(issue.value).slice(0, 180)}`}`)];
+    return { bindings, warnings: [...new Set(warnings)], compatibility };
+  }
+
+  async function sync(id, { force = false } = {}) {
     const entry = entries.get(id);
     if (!entry) throw new Error("自由卡片不存在");
     const state = await sourceState(entry);
     if (!state.exists) throw new Error("源工作流文件已不存在，可能已在 ComfyUI 中删除");
-    if (!state.changed) return { changed: false, entry };
+    if (!force && !state.changed && entry.conversionVersion === CONVERSION_VERSION) return { changed: false, entry };
+    if (force) await getObjectInfo(true);
     const source = await readSource(entry.sourceRel);
-    const bindings = detectFreeBindings(source.workflow, await getObjectInfo());
+    const { bindings, warnings, compatibility } = await describeSource(source);
     entry.workflow = source.workflow;
     entry.bindings = bindings;
-    entry.warnings = [...(source.warnings || []), ...(bindings.warnings || [])];
+    entry.warnings = warnings;
+    entry.compatibility = compatibility;
+    entry.conversionVersion = CONVERSION_VERSION;
     entry.sourceFormat = source.format;
     entry.sourceSignature = source.signature;
     entry.sourceUpdatedAt = nowIso();
@@ -361,6 +378,7 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", comfy
       preset: entry.preset || null,
       ...bindingSummary(entry.bindings || {}),
       warnings: entry.warnings || [],
+      compatibility: entry.compatibility || null,
     };
   }
 
