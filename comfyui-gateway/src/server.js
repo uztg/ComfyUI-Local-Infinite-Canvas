@@ -16,6 +16,7 @@ import { createLogger, loadConfig } from "./config.js";
 import { describeAutoDirectories, detectComfyLayout, directoryLoadReport, normalizeDirectorySettings, saveDirectorySettings, scanDirectories, validateDirectorySettings, writeManagedExtraPaths } from "./directories.js";
 import { pickFolder } from "./folder-picker.js";
 import { createMainModelStore } from "./main-models.js";
+import { createModelEventBus } from "./model-events.js";
 import { createRegistry } from "./registry.js";
 import { createSessionTracker } from "./sessions.js";
 import { createSetupManager } from "./setup.js";
@@ -30,7 +31,7 @@ import { runImage, runVideo, runWorkflow } from "./runner.js";
 import { createSkinUnlockStore } from "./skin-unlocks.js";
 import { readSystemStats } from "./system-stats.js";
 import { createTaskStore } from "./tasks.js";
-import { applyUpdate, checkForUpdate } from "./update.js";
+import { applyUpdate, checkForUpdate, getUpdateProgress } from "./update.js";
 import { uploadImages } from "./uploads.js";
 import { createWorkflowVisibilityStore } from "./workflow-visibility.js";
 import { alignH3Frames, capH3ReferenceFrames, framesFromSeconds, extFromMime, jsonError, nowIso, parseSize, randomId, safeFileName, sleep } from "./util.js";
@@ -269,11 +270,12 @@ export async function createGatewayApp(overrides = {}) {
   await skinUnlocks.load();
   const workflowVisibility = createWorkflowVisibilityStore({ dataDir: config.dataDir, logger });
   await workflowVisibility.load();
+  const modelEvents = createModelEventBus({ logger });
   const comfyBridge = createComfyBridge({ config, logger });
   const bridgeStatus = await comfyBridge.ensure();
   if (!bridgeStatus.installed) logger.warn(`ComfyUI 工作流桥接未安装：${bridgeStatus.reason || "未知原因"}`);
   const sessions = createSessionTracker({ staleMs: config.sessionStaleSec * 1000 });
-  const setup = createSetupManager({ config, registry, comfy, logger, mainModelFile: (id) => mainModels.fileForWorkflow(id) });
+  const setup = createSetupManager({ config, registry, comfy, logger, mainModelFile: (id) => mainModels.fileForWorkflow(id), onScanComplete: () => modelEvents.broadcast("scan") });
   if (config.allowRemote && !config.gatewayToken) {
     logger.warn("ALLOW_REMOTE=1 但未设置 GATEWAY_TOKEN：/api/* 与 /admin 对局域网无鉴权，建议设置令牌或改回回环绑定。");
   }
@@ -556,12 +558,16 @@ export async function createGatewayApp(overrides = {}) {
     res.json(await checkForUpdate(config, { fetchRemote }));
   });
 
+  app.get("/api/update/progress", (_req, res) => {
+    res.json({ ok: true, progress: getUpdateProgress() });
+  });
+
   app.post("/api/update/apply", async (req, res) => {
     const active = tasks.list().some((task) => ["queued", "running"].includes(task.status));
     if (active) {
       throw new HttpError("有正在运行的生成任务，请等待完成或取消后再更新", { status: 409, code: "tasks_running" });
     }
-    res.json(await applyUpdate(config, { dryRun: req.body?.dryRun === true }));
+    res.json(await applyUpdate(config, { dryRun: req.body?.dryRun === true, force: req.body?.force === true }));
   });
 
   app.post("/api/system/restart-comfy", async (_req, res) => {
@@ -736,6 +742,10 @@ export async function createGatewayApp(overrides = {}) {
     res.json({ tasks: tasks.list().slice(0, 50) });
   });
 
+  app.get("/api/models/events", (req, res) => {
+    modelEvents.subscribe(req, res);
+  });
+
   app.get("/v1/models", async (_req, res) => {
     await registry.reloadIfChanged();
     const data = registry
@@ -783,6 +793,7 @@ export async function createGatewayApp(overrides = {}) {
     const enabled = req.body?.enabled !== false;
     await workflowVisibility.setHidden(entry.id, !enabled);
     logger.info(`workflow visibility ${entry.id} -> ${enabled ? "enabled" : "hidden"}`);
+    modelEvents.broadcast("visibility");
     res.json({ ok: true, id: entry.id, enabled });
   });
 

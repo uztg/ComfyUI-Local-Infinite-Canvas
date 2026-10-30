@@ -3,6 +3,12 @@ export const CONVERSION_VERSION = 2;
 const scalar = (type) => Array.isArray(type) || /^(INT|FLOAT|BOOLEAN|STRING|COMBO|COMFY_DYNAMICCOMBO_V3)$/.test(String(type));
 const plain = (value) => value && typeof value === 'object' && !Array.isArray(value);
 const virtual = new Set(['Note','MarkdownNote','Note Plus (mtb)','Label (rgthree)','Fast Groups Bypasser (rgthree)','Fast Groups Muter (rgthree)','Bookmark (rgthree)']);
+function isUiOnlyNode(node) {
+  const type=String(node?.type||'');
+  if(!/ignore.*group|group.*ignore|fast.*group|group.*bypass|group.*mute/i.test(type)) return false;
+  const links=[...(node.inputs||[]),...(node.outputs||[])];
+  return !links.some(item=>item?.link!==null&&item?.link!==undefined);
+}
 const controls = new Set(['fixed','randomize','increment','decrement']);
 const specialOrder = {
   KSampler: ['seed','control_after_generate','steps','cfg','sampler_name','scheduler','denoise'],
@@ -157,6 +163,10 @@ export function convertSavedWorkflow(ui, objectInfo={}) {
   }
   for(const ctx of contexts) for(const node of ctx.nodes.values()) {
     if([2,4].includes(Number(node.mode||0)) || virtual.has(node.type) || ['GetNode','SetNode','Reroute','PrimitiveNode'].includes(node.type) || definitions.has(node.type)) continue;
+    if(isUiOnlyNode(node)) {
+      warnings.push(`已忽略 UI 辅助节点「${node.title||node.type}」`);
+      continue;
+    }
     const id=`${ctx.prefix}${node.id}`, info=objectInfo[node.type], specs=schemaInputs(info), inputs={};
     const widgets={...ctx.widgets.get(String(node.id))};
     if(node.type==='VHS_VideoCombine') for(const field of specs.format?.opts?.formats?.[widgets.format]||[]) {
